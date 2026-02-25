@@ -38,6 +38,15 @@ src/l1sa/
 python -m pip install -e .
 ```
 
+## Dataset
+
+The RadioML 2016.10A dataset is **not included** in this repository.
+Download it separately and place it at:
+
+```text
+data/RML2016.10a_dict.pkl
+```
+
 ## Required CLI Commands
 
 ```bash
@@ -83,6 +92,44 @@ l1sa plot-distribution --pkl data/RML2016.10a_dict.pkl
 l1sa plot-constellation-sweep --pkl data/RML2016.10a_dict.pkl --mod QPSK --snrs -20 -10 0 10 18 --n 2000
 l1sa plot-psd-sweep --pkl data/RML2016.10a_dict.pkl --mod QPSK --snrs -20 -10 0 10 18 --window hann
 l1sa plot-evm-snr --pkl data/RML2016.10a_dict.pkl --mods QPSK 16QAM 64QAM
+```
+
+## Figure Gallery
+
+### Class/SNR Distribution
+![Class and SNR distribution](figures/distribution_class_snr.png)
+This summarizes class balance and sample density across SNR bins. It is useful as a first sanity check before training.
+
+### Constellation Sweep (QPSK)
+![Constellation sweep](figures/constellation_sweep_qpsk.png)
+This view shows how the constellation tightens as label SNR increases. It quickly highlights channel/noise effects across conditions.
+
+### PSD Sweep (QPSK, Hann)
+![PSD sweep](figures/psd_sweep_qpsk_hann.png)
+This compares average spectra over multiple SNR points using a consistent window. It helps verify spectral shape stability and noise-floor trends.
+
+### Window Leakage Demo
+![Window leakage](figures/window_leakage_qpsk_0db.png)
+This contrasts rectangular and tapered windows on the same frame. It makes main-lobe width vs side-lobe suppression tradeoffs visible.
+
+### Quality: Power vs SNR
+![Power vs SNR](figures/quality_power_vs_snr_qpsk.png)
+This curve tracks average frame power and variation against SNR labels. It provides a compact quality-control metric for dataset consistency.
+
+### Quality: Estimated SNR vs Label SNR
+![Estimated SNR vs label](figures/quality_snr_est_vs_snr_qpsk.png)
+This compares empirical SNR estimates against label SNR values. It helps check how well measured quality follows annotation.
+
+### EVM vs SNR
+![EVM vs SNR](figures/evm_vs_snr_multi_mod.png)
+This shows modulation-wise EVM behavior over SNR and supports side-by-side robustness comparison.
+
+## Reproduce
+
+Generate the core figures:
+
+```bash
+python -m l1sa make-core-figures --pkl data/RML2016.10a_dict.pkl --outdir outputs
 ```
 
 ## Metric Notes
