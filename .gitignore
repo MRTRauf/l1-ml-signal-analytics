@@ -1,7 +1,10 @@
 __pycache__/
 *.py[cod]
+*.pyc
 outputs/
 .venv/
 data/*.pkl
 data/*.zip
+.pytest_cache/
+*.zip
 

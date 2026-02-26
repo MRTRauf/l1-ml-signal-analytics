@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -38,6 +39,37 @@ DEFAULT_OUTDIR = "outputs"
 
 def _safe_tag(value: str) -> str:
     return str(value).replace(" ", "")
+
+
+def _write_psd_csv(
+    out_dir: Path,
+    mod: str,
+    snr: int,
+    window: str,
+    freq: np.ndarray,
+    pxx: np.ndarray,
+) -> Path:
+    csv_path = out_dir / f"psd_{_safe_tag(mod)}_{int(snr)}_{window.lower()}.csv"
+    pd.DataFrame({"f": freq, "psd": pxx}).to_csv(csv_path, index=False)
+    return csv_path
+
+
+def _write_evm_csvs(evm_df: pd.DataFrame, out_dir: Path) -> list[Path]:
+    csv_paths: list[Path] = []
+    for mod in sorted(evm_df["modulation"].unique().tolist()):
+        part = evm_df[evm_df["modulation"] == mod].sort_values("snr_label_db")
+        evm_rms = part["evm_rms_mean"].to_numpy(dtype=float)
+        csv_path = out_dir / f"evm_vs_snr_{_safe_tag(mod)}.csv"
+        pd.DataFrame(
+            {
+                "snr_db": part["snr_label_db"].to_numpy(dtype=int),
+                "evm_rms": evm_rms,
+                "evm_db": 20.0 * np.log10(np.maximum(evm_rms, 1e-15)),
+                "n_frames": part["n_frames"].to_numpy(dtype=int),
+            }
+        ).to_csv(csv_path, index=False)
+        csv_paths.append(csv_path)
+    return csv_paths
 
 
 def _load_dataset(pkl_path: str):
@@ -134,8 +166,7 @@ def cmd_plot_psd(args: argparse.Namespace) -> int:
         out_dir=out_dir,
         fs=args.fs,
     )
-    csv_path = out_dir / f"psd_{_safe_tag(mod)}_{args.snr}_{args.window.lower()}.csv"
-    pd.DataFrame({"f": freq, "psd": pxx}).to_csv(csv_path, index=False)
+    csv_path = _write_psd_csv(out_dir, mod=mod, snr=args.snr, window=args.window, freq=freq, pxx=pxx)
     win = get_window(args.window, n=frames.shape[1], fs=args.fs)
     print(f"Saved PNG: {out}; Saved CSV: {csv_path}")
     print(
@@ -168,8 +199,7 @@ def cmd_plot_psd_sweep(args: argparse.Namespace) -> int:
     csv_paths = []
     for snr in snrs:
         freq, pxx = curves[int(snr)]
-        csv_path = out_dir / f"psd_{_safe_tag(mod)}_{snr}_{args.window.lower()}.csv"
-        pd.DataFrame({"f": freq, "psd": pxx}).to_csv(csv_path, index=False)
+        csv_path = _write_psd_csv(out_dir, mod=mod, snr=snr, window=args.window, freq=freq, pxx=pxx)
         csv_paths.append(csv_path)
 
     n = iq_to_complex(get_frames(dataset, mod=mod, snr=snrs[0])).shape[1]
@@ -263,21 +293,7 @@ def cmd_plot_evm_snr(args: argparse.Namespace) -> int:
         raise ValueError(f"No supported EVM modulations provided. Supported: {SUPPORTED_EVM_MODS}")
 
     out = plot_evm_vs_snr(evm_df, out_dir=out_dir)
-
-    csv_paths = []
-    for mod in sorted(evm_df["modulation"].unique().tolist()):
-        part = evm_df[evm_df["modulation"] == mod].sort_values("snr_label_db")
-        evm_rms = part["evm_rms_mean"].to_numpy(dtype=float)
-        csv_path = out_dir / f"evm_vs_snr_{_safe_tag(mod)}.csv"
-        pd.DataFrame(
-            {
-                "snr_db": part["snr_label_db"].to_numpy(dtype=int),
-                "evm_rms": evm_rms,
-                "evm_db": 20.0 * np.log10(np.maximum(evm_rms, 1e-15)),
-                "n_frames": part["n_frames"].to_numpy(dtype=int),
-            }
-        ).to_csv(csv_path, index=False)
-        csv_paths.append(csv_path)
+    csv_paths = _write_evm_csvs(evm_df, out_dir=out_dir)
 
     print(f"Saved PNG: {out}; Saved CSV: {', '.join(str(path) for path in csv_paths)}")
     print(f"EVM vs SNR for mods: {', '.join(sorted(evm_df['modulation'].unique().tolist()))}.")
@@ -310,59 +326,70 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
 def cmd_make_core_figures(args: argparse.Namespace) -> int:
     dataset = _load_dataset(args.pkl)
+    out_dir = ensure_output_dir(args.outdir)
     mod = _resolve_mod(dataset, args.mod)
     snrs = _resolve_snrs(args.snrs, dataset)
 
-    generated = []
-    generated.append(plot_class_snr_distribution(dataset, out_dir=args.outdir))
-    generated.append(
+    png_paths: list[Path] = []
+    csv_paths: list[Path] = []
+
+    png_paths.append(plot_class_snr_distribution(dataset, out_dir=out_dir))
+    png_paths.append(
         plot_constellation_sweep(
             dataset=dataset,
             mod=mod,
             snrs=snrs,
             n_points_per_snr=args.n,
-            out_dir=args.outdir,
+            out_dir=out_dir,
         )
     )
-    generated.append(
+
+    curves: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for snr in snrs:
+        frames = iq_to_complex(get_frames(dataset, mod=mod, snr=snr))
+        freq, pxx, _ = mean_psd(frames, fs=args.fs, window=args.window)
+        curves[int(snr)] = (freq, pxx)
+        csv_paths.append(
+            _write_psd_csv(out_dir, mod=mod, snr=snr, window=args.window, freq=freq, pxx=pxx)
+        )
+
+    png_paths.append(
         plot_psd_sweep(
             dataset=dataset,
             mod=mod,
             snrs=snrs,
             window=args.window,
-            out_dir=args.outdir,
+            out_dir=out_dir,
             fs=args.fs,
+            curves=curves,
         )
     )
     frame = iq_to_complex(get_frames(dataset, mod=mod, snr=args.window_demo_snr))[args.frame_index]
-    generated.append(
+    png_paths.append(
         plot_window_demo(
             one_frame=frame,
             mod=mod,
             snr=args.window_demo_snr,
-            out_dir=args.outdir,
+            out_dir=out_dir,
             fs=args.fs,
         )
     )
     evm_mods = []
-    for mod in args.evm_mods:
-        if not is_supported_evm_mod(mod):
+    for evm_mod in args.evm_mods:
+        if not is_supported_evm_mod(evm_mod):
             continue
-        resolved = _resolve_evm_mod(dataset, mod)
+        resolved = _resolve_evm_mod(dataset, evm_mod)
         if resolved not in evm_mods:
             evm_mods.append(resolved)
     evm_df = evm_curves(dataset, mods=evm_mods)
     if evm_df.empty:
         raise ValueError("No supported EVM modulations were provided for core figures.")
-    generated.append(plot_evm_vs_snr(evm_df, out_dir=args.outdir))
+    png_paths.append(plot_evm_vs_snr(evm_df, out_dir=out_dir))
+    csv_paths.extend(_write_evm_csvs(evm_df, out_dir=out_dir))
 
-    print("Generated core figures:")
-    for path in generated:
-        print(f"- {path}")
-    print(
-        "Core set includes: class/SNR distribution, constellation sweep, PSD sweep, "
-        "window demo, and EVM vs SNR."
-    )
+    print(f"Saved outputs to: {out_dir}")
+    print(f"PNG files: {', '.join(path.name for path in png_paths)}")
+    print(f"CSV files: {', '.join(path.name for path in csv_paths)}")
     return 0
 
 
