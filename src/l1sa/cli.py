@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .amc import run_amc_baseline
 from .eda import dataset_summary_text
 from .io import (
     available_mods,
@@ -393,6 +394,29 @@ def cmd_make_core_figures(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_amc_baseline(args: argparse.Namespace) -> int:
+    dataset = _load_dataset(args.pkl)
+    outputs = run_amc_baseline(
+        dataset=dataset,
+        out_dir=args.outdir,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        max_per_snr=args.max_per_snr,
+        seed=args.seed,
+        test_size=args.test_size,
+        device=args.device,
+    )
+    print(
+        f"AMC baseline: n_train={outputs['n_train']}, n_test={outputs['n_test']}, "
+        f"overall_accuracy={outputs['overall_accuracy']:.4f}"
+    )
+    print(f"Saved PNG: {outputs['accuracy_png']}; Saved CSV: {outputs['accuracy_csv']}")
+    if outputs["confusion_png"] is not None:
+        print(f"Saved PNG: {outputs['confusion_png']}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build top-level parser."""
     parser = argparse.ArgumentParser(prog="l1sa", description="Layer-1 signal analytics toolkit")
@@ -480,6 +504,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_inspect.add_argument("--fs", type=float, default=1.0)
     p_inspect.add_argument("--outdir", type=str, default=DEFAULT_OUTDIR)
     p_inspect.set_defaults(func=cmd_inspect)
+
+    p_amc = sub.add_parser("amc-baseline", help="Train tiny PyTorch AMC baseline and plot accuracy vs SNR")
+    p_amc.add_argument("--pkl", type=str, required=True)
+    p_amc.add_argument("--outdir", type=str, default=DEFAULT_OUTDIR)
+    p_amc.add_argument("--epochs", type=int, default=3)
+    p_amc.add_argument("--batch-size", type=int, default=256)
+    p_amc.add_argument("--lr", type=float, default=1e-3)
+    p_amc.add_argument("--max-per-snr", type=int, default=2000)
+    p_amc.add_argument("--seed", type=int, default=42)
+    p_amc.add_argument("--test-size", type=float, default=0.2)
+    p_amc.add_argument("--device", type=str, default="cpu", choices=("cpu", "cuda"))
+    p_amc.set_defaults(func=cmd_amc_baseline)
 
     p_core = sub.add_parser("make-core-figures", help="Generate the 5 acceptance-core figures")
     p_core.add_argument("--pkl", type=str, default=DEFAULT_PKL)

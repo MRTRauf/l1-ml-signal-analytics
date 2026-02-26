@@ -12,6 +12,7 @@
 - EVM vs SNR curves for digital modulations
 - CSV artifacts for analytics workflows (`quality`, `evm`, `psd`, `inspect`)
 - `inspect` command for one-frame waveform + constellation + PSD view
+- Optional tiny PyTorch AMC baseline with accuracy-vs-SNR output
 
 ## Quickstart
 
@@ -33,6 +34,8 @@ Generate the core figures:
 python -m l1sa make-core-figures --pkl data/RML2016.10a_dict.pkl --outdir outputs
 ```
 
+Base toolkit commands above work without PyTorch.
+
 ## Commands
 
 ```bash
@@ -42,6 +45,24 @@ python -m l1sa window-demo --pkl data/RML2016.10a_dict.pkl --mod QPSK --snr 0 --
 python -m l1sa plot-psd-sweep --pkl data/RML2016.10a_dict.pkl --mod QPSK --snrs -20 -10 0 10 18 --window hann --outdir outputs
 python -m l1sa plot-evm-snr --pkl data/RML2016.10a_dict.pkl --mods QPSK 16QAM 64QAM --outdir outputs
 ```
+
+## Optional: AMC baseline (PyTorch)
+
+Install optional ML dependency:
+
+```bash
+pip install -r requirements-ml.txt
+```
+
+Use the appropriate PyTorch build for your system (CPU/CUDA) from the official install guide.
+
+Run the baseline:
+
+```bash
+python -m l1sa amc-baseline --pkl data/RML2016.10a_dict.pkl --outdir outputs
+```
+
+This generates `outputs/amc_accuracy_vs_snr.png` and `outputs/amc_accuracy_vs_snr.csv`.
 
 ## Figures
 
@@ -62,6 +83,9 @@ Average frame power trend versus SNR label.
 
 ![EVM vs SNR](figures/fig_evm_vs_snr.png)
 EVM curves across SNR for multiple modulations.
+
+![AMC accuracy vs SNR](figures/fig_amc_accuracy_vs_snr.png)
+Tiny CNN baseline accuracy trend across SNR labels.
 
 ## Testing
 
