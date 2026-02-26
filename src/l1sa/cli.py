@@ -396,25 +396,96 @@ def cmd_make_core_figures(args: argparse.Namespace) -> int:
 
 def cmd_amc_baseline(args: argparse.Namespace) -> int:
     dataset = _load_dataset(args.pkl)
+    base = {
+        "epochs": 10,
+        "batch_size": 256,
+        "lr": 1e-3,
+        "max_per_cell": 1500,
+        "seed": 42,
+        "test_size": 0.2,
+        "val_size": 0.1,
+        "snr_min": -10,
+        "snr_max": 18,
+        "device": "cpu",
+        "model_name": "rescnn",
+        "confusion_snr": 10,
+        "weight_decay": 1e-4,
+        "label_smoothing": 0.05,
+        "grad_clip": 1.0,
+        "scheduler_name": "plateau",
+        "patience": 5,
+        "min_epochs": 8,
+    }
+    presets = {
+        "fast": {
+            "model_name": "cnn",
+            "epochs": 10,
+            "max_per_cell": 800,
+            "scheduler_name": "plateau",
+        },
+        "best": {
+            "model_name": "rescnn",
+            "epochs": 20,
+            "max_per_cell": 2500,
+            "scheduler_name": "onecycle",
+            "weight_decay": 1e-4,
+            "label_smoothing": 0.05,
+            "grad_clip": 1.0,
+        },
+    }
+    if args.preset in presets:
+        base.update(presets[args.preset])
+
+    overrides = {
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "lr": args.lr,
+        "max_per_cell": args.max_per_cell,
+        "seed": args.seed,
+        "test_size": args.test_size,
+        "val_size": args.val_size,
+        "snr_min": args.snr_min,
+        "snr_max": args.snr_max,
+        "device": args.device,
+        "model_name": args.model,
+        "confusion_snr": args.confusion_snr,
+        "weight_decay": args.weight_decay,
+        "label_smoothing": args.label_smoothing,
+        "grad_clip": args.grad_clip,
+        "scheduler_name": args.scheduler,
+        "patience": args.patience,
+        "min_epochs": args.min_epochs,
+    }
+    for key, value in overrides.items():
+        if value is not None:
+            base[key] = value
+
     outputs = run_amc_baseline(
         dataset=dataset,
         out_dir=args.outdir,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        lr=args.lr,
-        max_per_snr=args.max_per_snr,
-        seed=args.seed,
-        test_size=args.test_size,
-        val_size=args.val_size,
-        snr_min=args.snr_min,
-        snr_max=args.snr_max,
-        device=args.device,
-        model_name=args.model,
-        confusion_snr=args.confusion_snr,
+        epochs=base["epochs"],
+        batch_size=base["batch_size"],
+        lr=base["lr"],
+        max_per_cell=base["max_per_cell"],
+        seed=base["seed"],
+        test_size=base["test_size"],
+        val_size=base["val_size"],
+        snr_min=base["snr_min"],
+        snr_max=base["snr_max"],
+        device=base["device"],
+        model_name=base["model_name"],
+        confusion_snr=base["confusion_snr"],
+        weight_decay=base["weight_decay"],
+        label_smoothing=base["label_smoothing"],
+        grad_clip=base["grad_clip"],
+        scheduler_name=base["scheduler_name"],
+        patience=base["patience"],
+        min_epochs=base["min_epochs"],
     )
     print(
         f"AMC baseline: n_train={outputs['n_train']}, n_val={outputs['n_val']}, n_test={outputs['n_test']}, "
-        f"overall_accuracy={outputs['overall_accuracy']:.4f}, macro_f1={outputs['macro_f1']:.4f}"
+        f"overall_accuracy={outputs['overall_accuracy']:.4f}, macro_f1={outputs['macro_f1']:.4f}, "
+        f"high_snr_accuracy={outputs['high_snr_accuracy']:.4f}"
     )
     print(f"Label map: {outputs['label_map']}")
     print(f"Saved PNG: {outputs['accuracy_png']}; Saved CSV: {outputs['accuracy_csv']}")
@@ -515,18 +586,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_amc = sub.add_parser("amc-baseline", help="Train tiny PyTorch AMC baseline and plot accuracy vs SNR")
     p_amc.add_argument("--pkl", type=str, required=True)
     p_amc.add_argument("--outdir", type=str, default=DEFAULT_OUTDIR)
-    p_amc.add_argument("--epochs", type=int, default=10)
-    p_amc.add_argument("--batch-size", type=int, default=256)
-    p_amc.add_argument("--lr", type=float, default=1e-3)
-    p_amc.add_argument("--max-per-snr", type=int, default=2000)
-    p_amc.add_argument("--seed", type=int, default=42)
-    p_amc.add_argument("--test-size", type=float, default=0.2)
-    p_amc.add_argument("--val-size", type=float, default=0.1)
-    p_amc.add_argument("--snr-min", type=int, default=-10)
-    p_amc.add_argument("--snr-max", type=int, default=18)
-    p_amc.add_argument("--device", type=str, default="cpu", choices=("cpu", "cuda"))
-    p_amc.add_argument("--model", type=str, default="cnn", choices=("cnn", "cldnn"))
-    p_amc.add_argument("--confusion-snr", type=int, default=10)
+    p_amc.add_argument("--preset", type=str, choices=("fast", "best"), default=None)
+    p_amc.add_argument("--epochs", type=int, default=None)
+    p_amc.add_argument("--batch-size", type=int, default=None)
+    p_amc.add_argument("--lr", type=float, default=None)
+    p_amc.add_argument("--max-per-cell", type=int, default=None)
+    p_amc.add_argument("--max-per-snr", dest="max_per_cell", type=int, default=None, help=argparse.SUPPRESS)
+    p_amc.add_argument("--seed", type=int, default=None)
+    p_amc.add_argument("--test-size", type=float, default=None)
+    p_amc.add_argument("--val-size", type=float, default=None)
+    p_amc.add_argument("--snr-min", type=int, default=None)
+    p_amc.add_argument("--snr-max", type=int, default=None)
+    p_amc.add_argument("--device", type=str, default=None, choices=("cpu", "cuda"))
+    p_amc.add_argument("--model", type=str, default=None, choices=("cnn", "cldnn", "rescnn"))
+    p_amc.add_argument("--confusion-snr", type=int, default=None)
+    p_amc.add_argument("--weight-decay", type=float, default=None)
+    p_amc.add_argument("--label-smoothing", type=float, default=None)
+    p_amc.add_argument("--grad-clip", type=float, default=None)
+    p_amc.add_argument("--scheduler", type=str, default=None, choices=("plateau", "cosine", "onecycle"))
+    p_amc.add_argument("--patience", type=int, default=None)
+    p_amc.add_argument("--min-epochs", type=int, default=None)
     p_amc.set_defaults(func=cmd_amc_baseline)
 
     p_core = sub.add_parser("make-core-figures", help="Generate the 5 acceptance-core figures")

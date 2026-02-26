@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from pathlib import Path
 from typing import Any
-import json
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -15,7 +15,6 @@ from .io import DatasetDict, ensure_output_dir
 
 
 EPS = 1e-6
-EARLY_STOP_PATIENCE = 3
 
 
 def _import_torch() -> tuple[Any, Any, Any, Any, Any]:
@@ -36,7 +35,7 @@ def set_determinism(seed: int) -> None:
 
 
 def normalize_frames(frames: np.ndarray, eps: float = EPS) -> np.ndarray:
-    """Per-frame per-channel normalization to zero-mean and unit-std."""
+    """Per-frame per-channel normalization to approximately zero-mean unit-std."""
     x = np.asarray(frames, dtype=np.float32)
     if x.ndim != 3 or x.shape[1] != 2:
         raise ValueError(f"Expected shape (N, 2, L), got {x.shape!r}")
@@ -47,23 +46,22 @@ def normalize_frames(frames: np.ndarray, eps: float = EPS) -> np.ndarray:
 
 def flatten_dataset(
     dataset: DatasetDict,
-    max_per_snr: int = 2000,
+    max_per_cell: int = 1500,
     seed: int = 42,
     snr_min: int = -10,
     snr_max: int = 18,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
     """
-    Flatten dict dataset into arrays.
+    Flatten dict dataset into arrays with deterministic cap per (modulation, snr) cell.
 
     Returns:
     - X: (N, 2, 128) float32
     - y: (N,) int64 modulation index
     - snr: (N,) int64 label SNR
-    - mods: modulation list ordered by index
+    - mods: deterministic modulation list (index mapping)
     """
     mods = sorted({mod for mod, _ in dataset})
-    all_snrs = sorted({int(snr) for _, snr in dataset})
-    snrs = [s for s in all_snrs if int(snr_min) <= int(s) <= int(snr_max)]
+    snrs = sorted({int(s) for _, s in dataset if int(snr_min) <= int(s) <= int(snr_max)})
     if not snrs:
         raise ValueError(f"No SNR labels in range [{snr_min}, {snr_max}].")
 
@@ -75,35 +73,21 @@ def flatten_dataset(
     snr_labels: list[np.ndarray] = []
 
     for snr_db in snrs:
-        present_mods = [m for m in mods if (m, int(snr_db)) in dataset]
-        if not present_mods:
-            continue
+        for mod in mods:
+            key = (mod, int(snr_db))
+            if key not in dataset:
+                continue
 
-        # Cap per SNR overall with deterministic near-balanced allocation across mods.
-        target_total = int(max_per_snr) if int(max_per_snr) > 0 else -1
-        if target_total > 0:
-            base = target_total // len(present_mods)
-            remainder = target_total % len(present_mods)
-        else:
-            base = -1
-            remainder = 0
-
-        for mod_idx, mod in enumerate(present_mods):
-            frames = np.asarray(dataset[(mod, int(snr_db))], dtype=np.float32)
+            frames = np.asarray(dataset[key], dtype=np.float32)
             if frames.ndim != 3 or frames.shape[1] != 2:
-                raise ValueError(
-                    f"Expected (N, 2, L) frames for key {(mod, snr_db)!r}, got {frames.shape!r}"
-                )
+                raise ValueError(f"Expected (N, 2, L) frames for key {key!r}, got {frames.shape!r}")
 
             n = int(frames.shape[0])
-            if base >= 0:
-                take = base + (1 if mod_idx < remainder else 0)
-                take = min(take, n)
+            if int(max_per_cell) > 0:
+                take = min(int(max_per_cell), n)
             else:
                 take = n
 
-            if take <= 0:
-                continue
             if take < n:
                 keep = np.sort(rng.choice(n, size=take, replace=False))
                 frames = frames[keep]
@@ -124,11 +108,7 @@ def flatten_dataset(
     return X[perm], y[perm], snr[perm], mods
 
 
-def _stratified_split_indices(
-    y: np.ndarray,
-    test_size: float,
-    seed: int,
-) -> tuple[np.ndarray, np.ndarray]:
+def _stratified_split_indices(y: np.ndarray, test_size: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
     if not (0.0 < test_size < 1.0):
         raise ValueError("split ratio must be in (0, 1).")
 
@@ -177,11 +157,11 @@ def _build_cnn_model(nn: Any, n_classes: int) -> Any:
                 nn.ReLU(),
                 nn.AdaptiveAvgPool1d(1),
             )
-            self.classifier = nn.Linear(128, classes)
+            self.head = nn.Sequential(nn.Dropout(0.2), nn.Linear(128, classes))
 
         def forward(self, x: Any) -> Any:
             z = self.features(x).squeeze(-1)
-            return self.classifier(z)
+            return self.head(z)
 
     return CNNAMCNet(n_classes)
 
@@ -201,15 +181,69 @@ def _build_cldnn_model(nn: Any, n_classes: int) -> Any:
                 nn.Dropout(0.2),
             )
             self.gru = nn.GRU(input_size=64, hidden_size=64, num_layers=1, batch_first=True)
-            self.classifier = nn.Linear(64, classes)
+            self.head = nn.Sequential(nn.Dropout(0.2), nn.Linear(64, classes))
 
         def forward(self, x: Any) -> Any:
             z = self.conv(x)
             z = z.transpose(1, 2)
             z, _ = self.gru(z)
-            return self.classifier(z[:, -1, :])
+            return self.head(z[:, -1, :])
 
     return CLDNNLite(n_classes)
+
+
+def _build_rescnn_model(nn: Any, n_classes: int) -> Any:
+    class ResidualBlock(nn.Module):
+        def __init__(self, c_in: int, c_out: int, stride: int = 1, p_drop: float = 0.25):
+            super().__init__()
+            self.conv1 = nn.Conv1d(c_in, c_out, kernel_size=3, stride=stride, padding=1, bias=False)
+            self.bn1 = nn.BatchNorm1d(c_out)
+            self.relu = nn.ReLU()
+            self.drop = nn.Dropout(p_drop)
+            self.conv2 = nn.Conv1d(c_out, c_out, kernel_size=3, stride=1, padding=1, bias=False)
+            self.bn2 = nn.BatchNorm1d(c_out)
+            if stride != 1 or c_in != c_out:
+                self.skip = nn.Sequential(
+                    nn.Conv1d(c_in, c_out, kernel_size=1, stride=stride, bias=False),
+                    nn.BatchNorm1d(c_out),
+                )
+            else:
+                self.skip = nn.Identity()
+
+        def forward(self, x: Any) -> Any:
+            identity = self.skip(x)
+            out = self.relu(self.bn1(self.conv1(x)))
+            out = self.drop(out)
+            out = self.bn2(self.conv2(out))
+            return self.relu(out + identity)
+
+    class ResCNNAMC(nn.Module):
+        def __init__(self, classes: int):
+            super().__init__()
+            self.stem = nn.Sequential(
+                nn.Conv1d(2, 64, kernel_size=7, padding=3, bias=False),
+                nn.BatchNorm1d(64),
+                nn.ReLU(),
+            )
+            self.blocks = nn.Sequential(
+                ResidualBlock(64, 64, stride=1, p_drop=0.2),
+                ResidualBlock(64, 64, stride=1, p_drop=0.2),
+                ResidualBlock(64, 64, stride=1, p_drop=0.2),
+                ResidualBlock(64, 128, stride=2, p_drop=0.25),
+                ResidualBlock(128, 128, stride=1, p_drop=0.25),
+                ResidualBlock(128, 256, stride=2, p_drop=0.3),
+                ResidualBlock(256, 256, stride=1, p_drop=0.3),
+            )
+            self.pool = nn.AdaptiveAvgPool1d(1)
+            self.head = nn.Sequential(nn.Dropout(0.35), nn.Linear(256, classes))
+
+        def forward(self, x: Any) -> Any:
+            z = self.stem(x)
+            z = self.blocks(z)
+            z = self.pool(z).squeeze(-1)
+            return self.head(z)
+
+    return ResCNNAMC(n_classes)
 
 
 def _build_model(nn: Any, n_classes: int, model_name: str) -> Any:
@@ -218,7 +252,9 @@ def _build_model(nn: Any, n_classes: int, model_name: str) -> Any:
         return _build_cnn_model(nn, n_classes)
     if name == "cldnn":
         return _build_cldnn_model(nn, n_classes)
-    raise ValueError(f"Unknown model {model_name!r}. Use 'cnn' or 'cldnn'.")
+    if name == "rescnn":
+        return _build_rescnn_model(nn, n_classes)
+    raise ValueError(f"Unknown model {model_name!r}. Use 'cnn', 'cldnn', or 'rescnn'.")
 
 
 def _predict(model: Any, loader: Any, device: Any, torch: Any) -> tuple[np.ndarray, np.ndarray]:
@@ -234,15 +270,12 @@ def _predict(model: Any, loader: Any, device: Any, torch: Any) -> tuple[np.ndarr
             preds.append(pred)
             targets.append(yb.numpy())
 
-    y_pred = np.concatenate(preds)
-    y_true = np.concatenate(targets)
-    return y_true, y_pred
+    return np.concatenate(targets), np.concatenate(preds)
 
 
 def _evaluate(model: Any, loader: Any, device: Any, torch: Any) -> tuple[float, np.ndarray, np.ndarray]:
     y_true, y_pred = _predict(model, loader, device, torch)
-    acc = float(np.mean(y_true == y_pred))
-    return acc, y_true, y_pred
+    return float(np.mean(y_true == y_pred)), y_true, y_pred
 
 
 def _macro_f1(y_true: np.ndarray, y_pred: np.ndarray, n_classes: int) -> float:
@@ -251,7 +284,6 @@ def _macro_f1(y_true: np.ndarray, y_pred: np.ndarray, n_classes: int) -> float:
         tp = int(np.sum((y_true == cls) & (y_pred == cls)))
         fp = int(np.sum((y_true != cls) & (y_pred == cls)))
         fn = int(np.sum((y_true == cls) & (y_pred != cls)))
-
         precision = tp / max(tp + fp, 1)
         recall = tp / max(tp + fn, 1)
         f1 = 2.0 * precision * recall / max(precision + recall, EPS)
@@ -317,15 +349,21 @@ def run_amc_baseline(
     epochs: int = 10,
     batch_size: int = 256,
     lr: float = 1e-3,
-    max_per_snr: int = 2000,
+    max_per_cell: int = 1500,
     seed: int = 42,
     test_size: float = 0.2,
     val_size: float = 0.1,
     snr_min: int = -10,
     snr_max: int = 18,
     device: str = "cpu",
-    model_name: str = "cnn",
+    model_name: str = "rescnn",
     confusion_snr: int = 10,
+    weight_decay: float = 1e-4,
+    label_smoothing: float = 0.05,
+    grad_clip: float = 1.0,
+    scheduler_name: str = "onecycle",
+    patience: int = 5,
+    min_epochs: int = 8,
 ) -> dict[str, Any]:
     torch, nn, DataLoader, TensorDataset, WeightedRandomSampler = _import_torch()
     set_determinism(seed)
@@ -336,7 +374,7 @@ def run_amc_baseline(
     out = ensure_output_dir(out_dir)
     X, y, snr, mods = flatten_dataset(
         dataset,
-        max_per_snr=max_per_snr,
+        max_per_cell=max_per_cell,
         seed=seed,
         snr_min=snr_min,
         snr_max=snr_max,
@@ -348,7 +386,6 @@ def run_amc_baseline(
         test_size=val_size,
         seed=seed + 1,
     )
-
     train_idx = train_all_idx[train_rel_idx]
     val_idx = train_all_idx[val_rel_idx]
 
@@ -368,15 +405,21 @@ def run_amc_baseline(
         device_obj = torch.device("cpu")
 
     model = _build_model(nn, n_classes=len(mods), model_name=model_name).to(device_obj)
-    optimizer = torch.optim.Adam(model.parameters(), lr=float(lr))
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="max",
-        factor=0.5,
-        patience=1,
-        min_lr=1e-5,
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=float(lr),
+        weight_decay=float(max(weight_decay, 0.0)),
     )
-    loss_fn = nn.CrossEntropyLoss()
+
+    loss_kwargs: dict[str, float] = {}
+    if float(label_smoothing) > 0.0:
+        loss_kwargs["label_smoothing"] = float(label_smoothing)
+    try:
+        loss_fn = nn.CrossEntropyLoss(**loss_kwargs)
+    except TypeError:
+        loss_fn = nn.CrossEntropyLoss()
+        if loss_kwargs:
+            print("label_smoothing is not supported in this torch version; using plain CrossEntropyLoss.")
 
     train_ds = TensorDataset(X_train, y_train)
     val_ds = TensorDataset(X_val, y_val)
@@ -386,6 +429,7 @@ def run_amc_baseline(
     class_counts = np.bincount(y_train_np, minlength=len(mods)).astype(float)
     class_weights = 1.0 / np.maximum(class_counts, 1.0)
     sample_weights = class_weights[y_train_np]
+
     train_gen = torch.Generator()
     train_gen.manual_seed(int(seed))
     train_sampler = WeightedRandomSampler(
@@ -398,6 +442,30 @@ def run_amc_baseline(
     train_loader = DataLoader(train_ds, batch_size=int(batch_size), sampler=train_sampler)
     val_loader = DataLoader(val_ds, batch_size=int(batch_size), shuffle=False)
     test_loader = DataLoader(test_ds, batch_size=int(batch_size), shuffle=False)
+
+    scheduler = None
+    sched_name = str(scheduler_name).lower()
+    if sched_name == "plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="max", factor=0.5, patience=1, min_lr=1e-5
+        )
+    elif sched_name == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(int(epochs), 1),
+            eta_min=max(float(lr) * 0.05, 1e-5),
+        )
+    elif sched_name == "onecycle":
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=float(lr),
+            steps_per_epoch=max(1, len(train_loader)),
+            epochs=max(int(epochs), 1),
+            pct_start=0.3,
+            anneal_strategy="cos",
+        )
+    else:
+        raise ValueError("scheduler_name must be one of: plateau, cosine, onecycle")
 
     best_val_acc = -1.0
     best_state = None
@@ -417,7 +485,13 @@ def run_amc_baseline(
             logits = model(xb)
             loss = loss_fn(logits, yb)
             loss.backward()
+
+            if float(grad_clip) > 0.0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
+
             optimizer.step()
+            if sched_name == "onecycle":
+                scheduler.step()
 
             running_loss += float(loss.item()) * int(yb.size(0))
             train_true_batches.append(yb.detach().cpu().numpy())
@@ -429,9 +503,13 @@ def run_amc_baseline(
         train_loss = running_loss / max(int(y_train_true_epoch.size), 1)
 
         val_acc, _, _ = _evaluate(model, val_loader, device_obj, torch)
-        scheduler.step(val_acc)
-        lr_now = float(optimizer.param_groups[0]["lr"])
 
+        if sched_name == "plateau":
+            scheduler.step(val_acc)
+        elif sched_name == "cosine":
+            scheduler.step()
+
+        lr_now = float(optimizer.param_groups[0]["lr"])
         print(
             f"Epoch {epoch + 1}/{int(epochs)} - train_loss={train_loss:.4f} "
             f"- train_acc={train_acc:.4f} - val_acc={val_acc:.4f} - lr={lr_now:.6f}"
@@ -443,7 +521,7 @@ def run_amc_baseline(
             patience_count = 0
         else:
             patience_count += 1
-            if patience_count >= EARLY_STOP_PATIENCE:
+            if (epoch + 1) >= int(min_epochs) and patience_count >= int(patience):
                 print(f"Early stopping at epoch {epoch + 1} (best_val_acc={best_val_acc:.4f}).")
                 break
 
@@ -464,6 +542,9 @@ def run_amc_baseline(
         )
     acc_df = pd.DataFrame(rows).sort_values("snr_db").reset_index(drop=True)
 
+    high_mask = snr_test >= 10
+    high_snr_acc = float(np.mean(y_true[high_mask] == y_pred[high_mask])) if np.any(high_mask) else float("nan")
+
     per_class_acc: dict[str, float] = {}
     for cls_idx, mod in enumerate(mods):
         m = y_true == cls_idx
@@ -475,6 +556,7 @@ def run_amc_baseline(
     metrics = {
         "overall_accuracy": float(overall_acc),
         "macro_f1": float(_macro_f1(y_true, y_pred, n_classes=len(mods))),
+        "high_snr_accuracy": float(high_snr_acc),
         "per_class_accuracy": per_class_acc,
         "label_map": {str(idx): mod for idx, mod in enumerate(mods)},
         "snr_min": int(snr_min),
@@ -484,6 +566,7 @@ def run_amc_baseline(
         "n_test": int(test_idx.size),
         "best_val_accuracy": float(best_val_acc),
         "model": str(model_name),
+        "scheduler": str(scheduler_name),
     }
 
     csv_path = out / "amc_accuracy_vs_snr.csv"
@@ -509,6 +592,7 @@ def run_amc_baseline(
         "n_test": int(test_idx.size),
         "overall_accuracy": float(overall_acc),
         "macro_f1": float(metrics["macro_f1"]),
+        "high_snr_accuracy": float(high_snr_acc),
         "mods": mods,
         "accuracy_csv": csv_path,
         "accuracy_png": png_path,
