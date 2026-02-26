@@ -8,3 +8,5 @@ data/*.zip
 .pytest_cache/
 *.zip
 
+
+*.egg-info/

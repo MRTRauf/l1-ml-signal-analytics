@@ -1,2 +1,0 @@
-[console_scripts]
-l1sa = l1sa.cli:main
