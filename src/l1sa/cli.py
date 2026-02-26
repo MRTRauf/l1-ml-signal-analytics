@@ -405,13 +405,20 @@ def cmd_amc_baseline(args: argparse.Namespace) -> int:
         max_per_snr=args.max_per_snr,
         seed=args.seed,
         test_size=args.test_size,
+        val_size=args.val_size,
+        snr_min=args.snr_min,
+        snr_max=args.snr_max,
         device=args.device,
+        model_name=args.model,
+        confusion_snr=args.confusion_snr,
     )
     print(
-        f"AMC baseline: n_train={outputs['n_train']}, n_test={outputs['n_test']}, "
-        f"overall_accuracy={outputs['overall_accuracy']:.4f}"
+        f"AMC baseline: n_train={outputs['n_train']}, n_val={outputs['n_val']}, n_test={outputs['n_test']}, "
+        f"overall_accuracy={outputs['overall_accuracy']:.4f}, macro_f1={outputs['macro_f1']:.4f}"
     )
+    print(f"Label map: {outputs['label_map']}")
     print(f"Saved PNG: {outputs['accuracy_png']}; Saved CSV: {outputs['accuracy_csv']}")
+    print(f"Saved JSON: {outputs['metrics_json']}")
     if outputs["confusion_png"] is not None:
         print(f"Saved PNG: {outputs['confusion_png']}")
     return 0
@@ -508,13 +515,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_amc = sub.add_parser("amc-baseline", help="Train tiny PyTorch AMC baseline and plot accuracy vs SNR")
     p_amc.add_argument("--pkl", type=str, required=True)
     p_amc.add_argument("--outdir", type=str, default=DEFAULT_OUTDIR)
-    p_amc.add_argument("--epochs", type=int, default=3)
+    p_amc.add_argument("--epochs", type=int, default=10)
     p_amc.add_argument("--batch-size", type=int, default=256)
     p_amc.add_argument("--lr", type=float, default=1e-3)
     p_amc.add_argument("--max-per-snr", type=int, default=2000)
     p_amc.add_argument("--seed", type=int, default=42)
     p_amc.add_argument("--test-size", type=float, default=0.2)
+    p_amc.add_argument("--val-size", type=float, default=0.1)
+    p_amc.add_argument("--snr-min", type=int, default=-10)
+    p_amc.add_argument("--snr-max", type=int, default=18)
     p_amc.add_argument("--device", type=str, default="cpu", choices=("cpu", "cuda"))
+    p_amc.add_argument("--model", type=str, default="cnn", choices=("cnn", "cldnn"))
+    p_amc.add_argument("--confusion-snr", type=int, default=10)
     p_amc.set_defaults(func=cmd_amc_baseline)
 
     p_core = sub.add_parser("make-core-figures", help="Generate the 5 acceptance-core figures")

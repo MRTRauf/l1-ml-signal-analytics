@@ -62,7 +62,25 @@ Run the baseline:
 python -m l1sa amc-baseline --pkl data/RML2016.10a_dict.pkl --outdir outputs
 ```
 
-This generates `outputs/amc_accuracy_vs_snr.png` and `outputs/amc_accuracy_vs_snr.csv`.
+The baseline uses per-frame normalization and defaults to `--snr-min -10 --snr-max 18`, which avoids the noisiest bins where labels are effectively ambiguous. A healthy run should show accuracy increasing with SNR.
+
+Fast demo (CPU-friendly):
+
+```bash
+python -m l1sa amc-baseline --pkl data/RML2016.10a_dict.pkl --outdir outputs --max-per-snr 500 --epochs 5 --model cnn
+```
+
+Better run (slower, stronger):
+
+```bash
+python -m l1sa amc-baseline --pkl data/RML2016.10a_dict.pkl --outdir outputs --max-per-snr 2000 --epochs 15 --model cldnn
+```
+
+Outputs include:
+- `outputs/amc_accuracy_vs_snr.png`
+- `outputs/amc_accuracy_vs_snr.csv`
+- `outputs/amc_overall_metrics.json`
+- optional `outputs/amc_confusion_snr_<SNR>.png`
 
 ## Figures
 
@@ -85,7 +103,7 @@ Average frame power trend versus SNR label.
 EVM curves across SNR for multiple modulations.
 
 ![AMC accuracy vs SNR](figures/fig_amc_accuracy_vs_snr.png)
-Tiny CNN baseline accuracy trend across SNR labels.
+Improved AMC baseline showing the expected rising accuracy trend as SNR increases.
 
 ## Testing
 
